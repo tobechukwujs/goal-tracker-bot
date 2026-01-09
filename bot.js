@@ -1,13 +1,12 @@
-// --- KEEP ALIVE SERVER (For Render/Cloud) ---
+
 const http = require('http');
 const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end('Bot is alive! 🤖');
+    res.end('Bot is alive!');
 });
 server.listen(process.env.PORT || 8080, () => {
     console.log("Keep-alive server is running.");
 });
-// --------------------------------------------
 require('dotenv').config();
 const TelegramBot = require('node-telegram-bot-api');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
@@ -24,19 +23,14 @@ const pool = new Pool({
     ssl: { rejectUnauthorized: false }
 });
 
-// User states for conversation flows
+
 const userStates = new Map();
 
 console.log(" Bot is starting...");
 
-// HELPER FUNCTIONS
-
-// Register user (FIXED: Now sends telegram_id)
 async function registerUser(chatId, username) {
     try {
-        // We use chatId as telegram_id for private chats
         await pool.query(
-            'INSERT INTO users (chat_id, telegram_id, username) VALUES ($1, $1, $2) ON CONFLICT (chat_id) DO NOTHING',
             [chatId, username]
         );
     } catch (err) {
@@ -44,7 +38,7 @@ async function registerUser(chatId, username) {
     }
 }
 
-// Generate and send daily plan
+
 async function generateAndSendDailyPlan(chatId, userId) {
     try {
         // Fetch user's goals with deadlines
@@ -61,7 +55,7 @@ async function generateAndSendDailyPlan(chatId, userId) {
 
         bot.sendMessage(chatId, "🤖 Generating your daily activity plan...");
 
-        // Build prompt with deadlines
+      
         const goalsText = goals.map(g => {
             if (g.deadline) {
                 return `- ${g.description} (Deadline: ${g.deadline})`;
@@ -87,7 +81,7 @@ async function generateAndSendDailyPlan(chatId, userId) {
         const response = await result.response;
         const text = response.text();
 
-        // Save to DB
+    
         await pool.query(
             'INSERT INTO daily_activities (user_id, content) VALUES ($1, $2) ON CONFLICT (user_id, activity_date) DO UPDATE SET content = $2',
             [userId, text]
@@ -103,7 +97,6 @@ async function generateAndSendDailyPlan(chatId, userId) {
 
 // TELEGRAM COMMANDS
 
-// /start
 bot.onText(/\/start/, async (msg) => {
     const chatId = msg.chat.id;
     await registerUser(chatId, msg.from.username);
@@ -121,7 +114,6 @@ bot.onText(/\/start/, async (msg) => {
     );
 });
 
-// /addgoal - Now asks for deadline
 bot.onText(/\/addgoal (.+)/, async (msg, match) => {
     const chatId = msg.chat.id;
     const goalText = match[1];
@@ -129,7 +121,6 @@ bot.onText(/\/addgoal (.+)/, async (msg, match) => {
     try {
         await registerUser(chatId, msg.from.username);
         
-        // Save goal text temporarily and ask for deadline
         userStates.set(chatId, { 
             state: 'awaiting_deadline', 
             tempGoal: goalText 
@@ -176,13 +167,13 @@ bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
     const state = userStates.get(chatId);
     
-    // Skip if it's a command
+   
     if (msg.text?.startsWith('/')) return;
     
-    // Handle deadline input for single goal
+   
     if (state && state.state === 'awaiting_deadline') {
         try {
-            // Ensure user exists first
+           
             await registerUser(chatId, msg.from.username);
             const userIdRes = await pool.query('SELECT id FROM users WHERE chat_id = $1', [chatId]);
             
@@ -408,35 +399,31 @@ bot.onText(/\/help/, (msg) => {
 
 // SCHEDULERS
 
-// 6:00 AM - Generate daily activities
+
+// 1. Generate Daily Plan at 6:00 AM Lagos Time
 cron.schedule('0 6 * * *', async () => {
-    console.log('⏰ Running 6:00 AM Scheduler...');
-    try {
-        const users = await pool.query('SELECT id, chat_id FROM users');
-        
-        for (const user of users.rows) {
-            await generateAndSendDailyPlan(user.chat_id, user.id);
-            // Small delay to prevent rate limiting
-            await new Promise(resolve => setTimeout(resolve, 2000)); 
-        }
-        
-        console.log(`✅ Sent daily plans to ${users.rows.length} user(s)`);
-    } catch (err) {
-        console.error('❌ Error in 6 AM scheduler:', err);
+    console.log('🌞 6 AM: Generating daily plans...');
+    const users = await pool.query('SELECT * FROM users');
+    for (const user of users.rows) {
+        await generateAndSendDailyPlan(user.chat_id, user.id);
     }
+}, {
+    timezone: "Africa/Lagos"  // <--- THIS FIXES THE 1-HOUR DELAY
 });
 
-// Reminders at 9 AM, 12 PM, 3 PM, 6 PM, and 9 PM
+// 2. Reminders at 9, 12, 3, 6, 9 PM Lagos Time
 cron.schedule('0 9,12,15,18,21 * * *', async () => {
-    const currentHour = new Date().getHours();
-    console.log(`🔔 Running ${currentHour}:00 Reminder...`);
+    // Get the current hour in Lagos Time explicitly
+    const lagosTime = new Date().toLocaleString("en-US", { timeZone: "Africa/Lagos" });
+    const currentHour = new Date(lagosTime).getHours();
+    
+    console.log(`🔔 Running Reminder for Hour: ${currentHour}`);
     
     try {
         const users = await pool.query('SELECT chat_id FROM users');
-        
         let msgText = "🔔 Reminder: Check your daily goals!";
         
-        // Custom messages for each time
+        // Exact Lagos hours
         if (currentHour === 9)  msgText = "🕘 9 AM Check-in: Have you started your first task yet?";
         if (currentHour === 12) msgText = "🕛 12 PM Reminder: How's your progress going?";
         if (currentHour === 15) msgText = "🕒 3 PM Boost: Keep pushing! You're doing great!";
@@ -444,20 +431,17 @@ cron.schedule('0 9,12,15,18,21 * * *', async () => {
         if (currentHour === 21) msgText = "🌙 9 PM End of Day: Great work today! Get some rest. 😴";
 
         for (const user of users.rows) {
-            try {
-                await bot.sendMessage(user.chat_id, msgText);
-            } catch (err) {
-                console.error(`Error sending to ${user.chat_id}:`, err.message);
-            }
+            // Add a tiny delay between messages to prevent "Snags"
+            await new Promise(resolve => setTimeout(resolve, 200)); 
+            await bot.sendMessage(user.chat_id, msgText);
         }
-        
-        console.log(`✅ Sent reminders to ${users.rows.length} user(s)`);
     } catch (err) {
-        console.error(' Error in reminder scheduler:', err);
+        console.error('❌ Error in reminder scheduler:', err);
     }
+}, {
+    timezone: "Africa/Lagos" // <--- CRITICAL FIX
 });
 
-// IMPROVED ERROR HANDLING
 bot.on('polling_error', (error) => {
     if (['EFATAL', 'ECONNRESET', 'ETIMEDOUT', 'ENOTFOUND'].includes(error.code)) {
         console.log(" Network unstable... waiting for connection.");
