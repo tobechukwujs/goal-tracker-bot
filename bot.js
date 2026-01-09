@@ -41,7 +41,7 @@ async function registerUser(chatId, username) {
 }
 
 // --- CORE FUNCTION: GENERATE PLAN (With Carry-Over & Checkboxes) ---
-// --- FUNCTION: Generate Plan with Robust Parsing ---
+// --- FUNCTION: Generate Plan (JSON Mode - 100% Robust) ---
 async function generateAndSendDailyPlan(chatId, userId) {
     try {
         bot.sendMessage(chatId, "🤖 Checking yesterday's progress and generating today's plan...");
@@ -75,63 +75,68 @@ async function generateAndSendDailyPlan(chatId, userId) {
             return;
         }
 
-        // 3. Prepare Prompt
+        // 3. Prepare Prompt (Request JSON)
         const goalsText = goals.map(g => g.deadline ? `- ${g.description} (Deadline: ${g.deadline})` : `- ${g.description}`).join('\n');
 
         let prompt = `
             Context: The user has the following long-term goals:\n${goalsText}
             
-            Instructions: Generate a strictly numbered daily to-do list for TODAY.
-            - Create exactly ONE actionable task for EACH long-term goal.
-            - Format output exactly like:
-              1. Task text here
-              2. Task text here
-            - Do not use markdown bolding on the numbers.
-            - Add a short motivational quote at the very end.
+            Instructions: Generate a daily plan for TODAY.
+            You must return ONLY a raw JSON object. Do not use Markdown formatting.
+            Structure:
+            {
+              "tasks": [
+                { "id": 1, "text": "Task text here" },
+                { "id": 2, "text": "Task text here" }
+              ],
+              "quote": "Motivational quote here"
+            }
+            Create exactly ONE actionable task for EACH long-term goal. Max 5 tasks.
         `;
 
         if (unfinishedTasks.length > 0) {
-            prompt += `\nIMPORTANT: Include these unfinished tasks from yesterday first:\n${unfinishedTasks.join("\n")}`;
+            prompt += `\nIMPORTANT: First, include these unfinished tasks from yesterday:\n${JSON.stringify(unfinishedTasks)}`;
         }
 
         // 4. AI Generation
         const result = await model.generateContent(prompt);
-        const text = result.response.text();
+        let rawText = result.response.text();
         
-        // --- DEBUGGING LOG (Check Render Logs if buttons fail) ---
-        console.log("📝 AI RAW OUTPUT:\n", text); 
+        // CLEANUP: Remove markdown code blocks if AI adds them (e.g. ```json ... ```)
+        rawText = rawText.replace(/```json|```/g, '').trim();
 
-        // 5. ROBUST PARSING (The Fix)
-        const tasksArray = [];
-        const lines = text.split('\n');
+        // 5. PARSE JSON
+        let data;
+        try {
+            data = JSON.parse(rawText);
+        } catch (jsonError) {
+            console.error("JSON Parse Error. AI Output:", rawText);
+            // Fallback: If JSON fails, just send the text
+            return bot.sendMessage(chatId, `⚠️ AI Output Error. Here is the raw text:\n\n${rawText}`);
+        }
+
+        const tasksArray = data.tasks.map(t => ({ ...t, done: false }));
         
-        lines.forEach(line => {
-            // A. Clean the line (remove * for bolding, trim spaces)
-            const cleanLine = line.replace(/\*/g, '').trim();
-            
-            // B. Flexible Regex: Matches "1.", "1)", "1:", "1 "
-            const match = cleanLine.match(/^(\d+)[\.\)\:\s]\s*(.*)/);
-            
-            if (match) {
-                tasksArray.push({
-                    id: parseInt(match[1]), 
-                    text: match[2].trim(),
-                    done: false
-                });
-            }
+        // 6. BUILD MESSAGE TEXT MANUALLY (Safe Mode)
+        let messageText = "🌞 **Here is your plan for today:**\n\n";
+        
+        if (unfinishedTasks.length > 0) messageText = "⚠️ **Carried over unfinished tasks!** \n\n" + messageText;
+
+        tasksArray.forEach(task => {
+            messageText += `${task.id}. ${task.text}\n`;
         });
+        
+        messageText += `\n_"${data.quote}"_`;
 
-        console.log(`✅ Parsed ${tasksArray.length} tasks.`); // Debug log
-
-        // 6. Save to DB
+        // 7. Save to DB
         await pool.query(`
             INSERT INTO daily_activities (user_id, content, tasks, activity_date)
             VALUES ($1, $2, $3, CURRENT_DATE)
             ON CONFLICT (user_id, activity_date) 
             DO UPDATE SET content = EXCLUDED.content, tasks = EXCLUDED.tasks;
-        `, [userId, text, JSON.stringify(tasksArray)]);
+        `, [userId, messageText, JSON.stringify(tasksArray)]);
 
-        // 7. Create Buttons
+        // 8. Create Buttons
         const buttons = [];
         let row = [];
         tasksArray.forEach(task => {
@@ -140,18 +145,20 @@ async function generateAndSendDailyPlan(chatId, userId) {
         });
         if (row.length > 0) buttons.push(row);
 
-        // 8. Send Message
-        let msgHeader = "🌞 **Here is your plan for today:**";
-        if (unfinishedTasks.length > 0) msgHeader = "⚠️ **Carried over unfinished tasks!** \n\n" + msgHeader;
-
-        await bot.sendMessage(chatId, `${msgHeader}\n\n${text}`, {
-            parse_mode: 'Markdown',
+        // 9. Send Message
+        await bot.sendMessage(chatId, messageText, {
+            parse_mode: 'Markdown', // We constructed the text safely, so this is fine now
             reply_markup: { inline_keyboard: buttons }
         });
 
     } catch (error) {
         console.error("Error generating plan:", error);
-        bot.sendMessage(chatId, "⚠️ I tried to generate your plan but hit a snag. Please try /generate again.");
+        // Better error message
+        if (error.response && error.response.statusCode === 400) {
+            bot.sendMessage(chatId, "⚠️ Telegram Error: The AI used a character that broke the format. Trying to fix...");
+        } else {
+            bot.sendMessage(chatId, "⚠️ I tried to generate your plan but hit a snag. Please try /generate again.");
+        }
     }
 }
 
