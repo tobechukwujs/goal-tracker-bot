@@ -15,6 +15,18 @@ const cron = require('node-cron');
 
 // CONFIGURATION
 const bot = new TelegramBot(process.env.TELEGRAM_TOKEN, { polling: true });
+// --- SET COMMAND MENU (Auto-Suggestions) ---
+bot.setMyCommands([
+    { command: '/start', description: 'Welcome & Register' },
+    { command: '/addgoal', description: 'Add a new goal' },
+    { command: '/addmany', description: 'Add multiple goals' },
+    { command: '/mygoals', description: 'View & Manage goals' },
+    { command: '/generate', description: 'Generate daily plan now' },
+    { command: '/clear', description: 'Delete all data' },
+    { command: '/help', description: 'Show instructions' }
+]).then(() => {
+    console.log("Command menu updated!");
+});
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
 
