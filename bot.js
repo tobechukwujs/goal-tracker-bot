@@ -102,7 +102,7 @@ async function generateAndSendDailyPlan(chatId, userId) {
         const result = await model.generateContent(prompt);
         let rawText = result.response.text();
         
-        // CLEANUP: Remove markdown code blocks if AI adds them (e.g. ```json ... ```)
+        // CLEANUP: Remove markdown code blocks if AI adds them
         rawText = rawText.replace(/```json|```/g, '').trim();
 
         // 5. PARSE JSON
@@ -111,22 +111,25 @@ async function generateAndSendDailyPlan(chatId, userId) {
             data = JSON.parse(rawText);
         } catch (jsonError) {
             console.error("JSON Parse Error. AI Output:", rawText);
-            // Fallback: If JSON fails, just send the text
-            return bot.sendMessage(chatId, `⚠️ AI Output Error. Here is the raw text:\n\n${rawText}`);
+            return bot.sendMessage(chatId, `⚠️ AI Error. It sent invalid data.`);
         }
 
         const tasksArray = data.tasks.map(t => ({ ...t, done: false }));
         
         // 6. BUILD MESSAGE TEXT MANUALLY (Safe Mode)
-        let messageText = "🌞 **Here is your plan for today:**\n\n";
+        // We build the string ourselves to prevent "ETELEGRAM" errors
+        let messageText = "🌞 *Here is your plan for today:*\n\n";
         
-        if (unfinishedTasks.length > 0) messageText = "⚠️ **Carried over unfinished tasks!** \n\n" + messageText;
+        if (unfinishedTasks.length > 0) messageText = "⚠️ *Carried over unfinished tasks!* \n\n" + messageText;
 
         tasksArray.forEach(task => {
-            messageText += `${task.id}. ${task.text}\n`;
+            // Escape special markdown characters to prevent crashes
+            const safeText = task.text.replace(/[_*[\]()~>#+=|{}.!-]/g, '\\$&');
+            messageText += `${task.id}\\. ${safeText}\n`;
         });
         
-        messageText += `\n_"${data.quote}"_`;
+        const safeQuote = data.quote.replace(/[_*[\]()~>#+=|{}.!-]/g, '\\$&');
+        messageText += `\n_${safeQuote}_`;
 
         // 7. Save to DB
         await pool.query(`
@@ -147,18 +150,13 @@ async function generateAndSendDailyPlan(chatId, userId) {
 
         // 9. Send Message
         await bot.sendMessage(chatId, messageText, {
-            parse_mode: 'Markdown', // We constructed the text safely, so this is fine now
+            parse_mode: 'MarkdownV2', // Using V2 for better escaping support
             reply_markup: { inline_keyboard: buttons }
         });
 
     } catch (error) {
         console.error("Error generating plan:", error);
-        // Better error message
-        if (error.response && error.response.statusCode === 400) {
-            bot.sendMessage(chatId, "⚠️ Telegram Error: The AI used a character that broke the format. Trying to fix...");
-        } else {
-            bot.sendMessage(chatId, "⚠️ I tried to generate your plan but hit a snag. Please try /generate again.");
-        }
+        bot.sendMessage(chatId, "⚠️ I tried to generate your plan but hit a snag. Please try /generate again.");
     }
 }
 
