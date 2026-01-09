@@ -41,6 +41,7 @@ async function registerUser(chatId, username) {
 }
 
 // --- CORE FUNCTION: GENERATE PLAN (With Carry-Over & Checkboxes) ---
+// --- FUNCTION: Generate Plan with Robust Parsing ---
 async function generateAndSendDailyPlan(chatId, userId) {
     try {
         bot.sendMessage(chatId, "🤖 Checking yesterday's progress and generating today's plan...");
@@ -59,10 +60,7 @@ async function generateAndSendDailyPlan(chatId, userId) {
 
         let unfinishedTasks = [];
         if (yesterdayRes.rows.length > 0 && yesterdayRes.rows[0].tasks) {
-            // Filter for tasks where done === false
-            unfinishedTasks = yesterdayRes.rows[0].tasks
-                .filter(t => !t.done)
-                .map(t => t.text);
+            unfinishedTasks = yesterdayRes.rows[0].tasks.filter(t => !t.done).map(t => t.text);
         }
 
         // 2. Fetch Active Goals
@@ -78,52 +76,54 @@ async function generateAndSendDailyPlan(chatId, userId) {
         }
 
         // 3. Prepare Prompt
-        const goalsText = goals.map(g => {
-            return g.deadline ? `- ${g.description} (Deadline: ${g.deadline})` : `- ${g.description}`;
-        }).join('\n');
+        const goalsText = goals.map(g => g.deadline ? `- ${g.description} (Deadline: ${g.deadline})` : `- ${g.description}`).join('\n');
 
         let prompt = `
             Context: The user has the following long-term goals:\n${goalsText}
             
             Instructions: Generate a strictly numbered daily to-do list for TODAY.
             - Create exactly ONE actionable task for EACH long-term goal.
-            - Each task should be achievable in 30-60 minutes.
             - Format output exactly like:
               1. Task text here
               2. Task text here
+            - Do not use markdown bolding on the numbers.
             - Add a short motivational quote at the very end.
         `;
 
         if (unfinishedTasks.length > 0) {
-            prompt += `
-            IMPORTANT: The user FAILED to complete these tasks yesterday. You MUST include them (or a revised version) at the top of the list:
-            ${unfinishedTasks.join("\n")}
-            `;
+            prompt += `\nIMPORTANT: Include these unfinished tasks from yesterday first:\n${unfinishedTasks.join("\n")}`;
         }
 
         // 4. AI Generation
         const result = await model.generateContent(prompt);
         const text = result.response.text();
+        
+        // --- DEBUGGING LOG (Check Render Logs if buttons fail) ---
+        console.log("📝 AI RAW OUTPUT:\n", text); 
 
-        // 5. Parse Text into Structured JSON
+        // 5. ROBUST PARSING (The Fix)
         const tasksArray = [];
         const lines = text.split('\n');
-        let taskIndex = 1;
         
         lines.forEach(line => {
-            // .trim() removes hidden spaces at the start
-            // We also capture the number just in case the AI skips a number
-            const match = line.trim().match(/^(\d+)\.\s+(.*)/);
+            // A. Clean the line (remove * for bolding, trim spaces)
+            const cleanLine = line.replace(/\*/g, '').trim();
+            
+            // B. Flexible Regex: Matches "1.", "1)", "1:", "1 "
+            const match = cleanLine.match(/^(\d+)[\.\)\:\s]\s*(.*)/);
+            
             if (match) {
                 tasksArray.push({
-                    id: parseInt(match[1]), // Use the number the AI generated
-                    text: match[2].trim(),  // The task text
+                    id: parseInt(match[1]), 
+                    text: match[2].trim(),
                     done: false
                 });
             }
         });
 
-        // 6. Save to DB (Content + JSON Tasks)
+        console.log(`✅ Parsed ${tasksArray.length} tasks.`); // Debug log
+
+        // 6. Save to DB
         await pool.query(`
             INSERT INTO daily_activities (user_id, content, tasks, activity_date)
             VALUES ($1, $2, $3, CURRENT_DATE)
@@ -131,7 +131,7 @@ async function generateAndSendDailyPlan(chatId, userId) {
             DO UPDATE SET content = EXCLUDED.content, tasks = EXCLUDED.tasks;
         `, [userId, text, JSON.stringify(tasksArray)]);
 
-        // 7. Create Interactive Buttons
+        // 7. Create Buttons
         const buttons = [];
         let row = [];
         tasksArray.forEach(task => {
