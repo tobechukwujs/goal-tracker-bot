@@ -111,12 +111,13 @@ async function generateAndSendDailyPlan(chatId, userId) {
         let taskIndex = 1;
         
         lines.forEach(line => {
-            // Match lines starting with "1. ", "2. " etc.
-            const match = line.match(/^\d+\.\s+(.*)/);
+            // .trim() removes hidden spaces at the start
+            // We also capture the number just in case the AI skips a number
+            const match = line.trim().match(/^(\d+)\.\s+(.*)/);
             if (match) {
                 tasksArray.push({
-                    id: taskIndex++,
-                    text: match[1].trim(),
+                    id: parseInt(match[1]), // Use the number the AI generated
+                    text: match[2].trim(),  // The task text
                     done: false
                 });
             }
