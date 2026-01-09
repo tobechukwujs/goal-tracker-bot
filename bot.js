@@ -388,27 +388,49 @@ cron.schedule('0 6 * * *', async () => {
     }
 }, { timezone: "Africa/Lagos" });
 
-// 2. Reminders
+// 2. Reminders at 9, 12, 3, 6, 9 PM Lagos Time
 cron.schedule('0 9,12,15,18,21 * * *', async () => {
+    // Get the current hour in Lagos Time explicitly
     const lagosTime = new Date().toLocaleString("en-US", { timeZone: "Africa/Lagos" });
     const currentHour = new Date(lagosTime).getHours();
-    console.log(`🔔 Running Reminder: ${currentHour}:00`);
+    
+    console.log(`🔔 Running Reminder for Hour: ${currentHour}`);
     
     try {
-        const users = await pool.query('SELECT chat_id FROM users');
-        let msgText = "🔔 Check your goals!";
+        // --- UPDATED QUERY: Only fetch users who have at least one goal ---
+        // We use "DISTINCT" so if a user has 10 goals, we don't message them 10 times.
+        const users = await pool.query(`
+            SELECT DISTINCT u.chat_id 
+            FROM users u
+            INNER JOIN goals g ON u.id = g.user_id
+        `);
         
-        if (currentHour === 9)  msgText = "🕘 9 AM: Started your tasks yet?";
-        if (currentHour === 12) msgText = "🕛 12 PM: How's progress?";
-        if (currentHour === 15) msgText = "🕒 3 PM: Keep pushing!";
-        if (currentHour === 18) msgText = "🕕 6 PM: Wrap up time!";
-        if (currentHour === 21) msgText = "🌙 9 PM: Great work today. Rest up!";
+        if (users.rows.length === 0) {
+            console.log("No users with active goals to remind.");
+            return;
+        }
+
+        let msgText = "🔔 Reminder: Check your daily goals!";
+        
+        // Exact Lagos hours
+        if (currentHour === 9)  msgText = "🕘 9 AM Check-in: Have you started your first task yet?";
+        if (currentHour === 12) msgText = "🕛 12 PM Reminder: How's your progress going?";
+        if (currentHour === 15) msgText = "🕒 3 PM Boost: Keep pushing! You're doing great!";
+        if (currentHour === 18) msgText = "🕕 6 PM Review: Time to wrap up. How much did you finish?";
+        if (currentHour === 21) msgText = "🌙 9 PM End of Day: Great work today! Get some rest. 😴";
+
+        console.log(`Sending reminders to ${users.rows.length} active users...`);
 
         for (const user of users.rows) {
+            // Add a tiny delay between messages to prevent "Snags"
             await new Promise(resolve => setTimeout(resolve, 200)); 
             await bot.sendMessage(user.chat_id, msgText);
         }
-    } catch (err) { console.error(err); }
-}, { timezone: "Africa/Lagos" });
+    } catch (err) {
+        console.error('❌ Error in reminder scheduler:', err);
+    }
+}, {
+    timezone: "Africa/Lagos"
+});
 
 bot.on('polling_error', (error) => console.log(`Telegram Error: ${error.code}`));
