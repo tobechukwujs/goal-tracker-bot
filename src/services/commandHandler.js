@@ -152,6 +152,10 @@ export async function handleHelp({ platform, chatId }) {
 \`/streak\` — See your current streak
 \`/today\` — See today's plan
 
+*Account*
+\`/link\` — Get a code to link Telegram ↔ WhatsApp
+\`/confirm <code>\` — Enter link code from other platform
+
 *Other*
 \`/help\` — Show this message
 
@@ -173,4 +177,59 @@ export async function handleToday({ userId, platform, chatId }) {
     });
   }
   await sendMessage({ platform, chatId, text: plan.content });
+}
+
+// ── Account Linking ──────────────────────────────────────────
+
+/**
+ * Step 1 — User on Platform A runs /link
+ * Generates a 6-character token and tells them to enter it on Platform B.
+ */
+export async function handleLink({ userId, platform, chatId }) {
+  const token = await db.createLinkToken(userId);
+  const otherPlatform = platform === 'telegram' ? 'WhatsApp' : 'Telegram';
+
+  await sendMessage({
+    platform, chatId,
+    text: `🔗 *Link Your Accounts*\n\nYour link code is:\n\n*\`${token}\`*\n\nGo to *${otherPlatform}* and send:\n\`/confirm ${token}\`\n\n⏰ This code expires in *10 minutes*.`,
+  });
+}
+
+/**
+ * Step 2 — User on Platform B runs /confirm <token>
+ * Merges the two accounts — Platform B's data moves into Platform A's account.
+ */
+export async function handleConfirmLink({ userId, platform, chatId, token }) {
+  if (!token || token.trim().length < 4) {
+    return sendMessage({
+      platform, chatId,
+      text: '❌ Usage: `/confirm ABC123`\n\nGet your code by sending `/link` on your other platform.',
+    });
+  }
+
+  // Find the primary user who generated the token
+  const primaryUserId = await db.consumeLinkToken(token.trim());
+
+  if (!primaryUserId) {
+    return sendMessage({
+      platform, chatId,
+      text: '❌ Invalid or expired code. Go to your other platform and run `/link` again to get a fresh code.',
+    });
+  }
+
+  if (primaryUserId === userId) {
+    return sendMessage({
+      platform, chatId,
+      text: '❌ You cannot link an account to itself. Run `/link` on your *other* platform (Telegram or WhatsApp).',
+    });
+  }
+
+  // Merge current user (secondUserId) into primary user
+  await db.mergeUsers(primaryUserId, userId);
+  logger.info(CTX, 'Accounts merged', { primaryUserId, secondUserId: userId });
+
+  await sendMessage({
+    platform, chatId,
+    text: `✅ *Accounts linked successfully!*\n\nYour Telegram and WhatsApp are now synced.\n\n• Goals are shared across both platforms\n• Streaks are combined\n• Morning plans will be sent to *both* platforms\n\nYou're all set! 🎉`,
+  });
 }

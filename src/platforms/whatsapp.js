@@ -64,6 +64,12 @@ export function initWhatsApp(app) {
       } else if (cmd === 'today') {
         const user = await db.getUserByPlatformId('whatsapp', from);
         if (user) await handler.handleToday({ userId: user.id, platform: 'whatsapp', chatId: from });
+      } else if (cmd === 'link') {
+        const user = await db.getUserByPlatformId('whatsapp', from);
+        if (user) await handler.handleLink({ userId: user.id, platform: 'whatsapp', chatId: from });
+      } else if (cmd.startsWith('confirm ')) {
+        const user = await db.getUserByPlatformId('whatsapp', from);
+        if (user) await handler.handleConfirmLink({ userId: user.id, platform: 'whatsapp', chatId: from, token: body.slice(8) });
       } else {
         // Free-text — treat as check-in response
         const user = await db.getUserByPlatformId('whatsapp', from);
