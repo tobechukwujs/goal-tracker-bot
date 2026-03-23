@@ -10,10 +10,10 @@ import { config } from '../config/index.js';
 const { Pool } = pg;
 
 export const pool = new Pool({
-  connectionString:       config.db.connectionString,
-  ssl:                    config.db.ssl,
-  max:                    config.db.poolMax,
-  idleTimeoutMillis:      config.db.idleTimeout,
+  connectionString:        config.db.connectionString,
+  ssl:                     config.db.ssl,
+  max:                     config.db.poolMax,
+  idleTimeoutMillis:       config.db.idleTimeout,
   connectionTimeoutMillis: config.db.connectionTimeout,
 });
 
@@ -21,9 +21,6 @@ pool.on('error', (err) => {
   console.error('[DB] Unexpected pool error:', err.message);
 });
 
-// ── Helpers ──────────────────────────────────────────────────
-
-/** Run a parameterised query and return all rows. */
 export const query = (text, params) => pool.query(text, params);
 
 // ── Users ────────────────────────────────────────────────────
@@ -56,10 +53,7 @@ export async function getAllActiveUsers() {
 }
 
 export async function updateUserPlatform(userId, platform) {
-  await query(
-    'UPDATE users SET preferred_platform = $1 WHERE id = $2',
-    [platform, userId]
-  );
+  await query('UPDATE users SET preferred_platform = $1 WHERE id = $2', [platform, userId]);
 }
 
 // ── User Platforms ───────────────────────────────────────────
@@ -120,11 +114,11 @@ export async function addGoal({ userId, goalText, category = 'general', priority
 export async function updateGoal(goalId, userId, { goalText, category, priority, targetDate }) {
   const { rows } = await query(
     `UPDATE goals
-     SET goal_text  = COALESCE($1, goal_text),
-         category   = COALESCE($2, category),
-         priority   = COALESCE($3, priority),
-         target_date= COALESCE($4, target_date),
-         updated_at = NOW()
+     SET goal_text   = COALESCE($1, goal_text),
+         category    = COALESCE($2, category),
+         priority    = COALESCE($3, priority),
+         target_date = COALESCE($4, target_date),
+         updated_at  = NOW()
      WHERE id = $5 AND user_id = $6
      RETURNING *`,
     [goalText, category, priority, targetDate, goalId, userId]
@@ -192,10 +186,7 @@ export async function getTodayCheckins(userId) {
 // ── Streaks ──────────────────────────────────────────────────
 
 export async function getStreak(userId) {
-  const { rows } = await query(
-    'SELECT * FROM streaks WHERE user_id = $1',
-    [userId]
-  );
+  const { rows } = await query('SELECT * FROM streaks WHERE user_id = $1', [userId]);
   return rows[0] || { current_streak: 0, longest_streak: 0 };
 }
 
@@ -214,12 +205,11 @@ export async function updateStreak(userId) {
     if (lastActive === yesterdayStr) {
       newCurrent = (streak.current_streak || 0) + 1;
     } else if (lastActive === today) {
-      return streak; // already updated today
+      return streak;
     }
   }
 
   const newLongest = Math.max(newCurrent, streak.longest_streak || 0);
-
   const { rows } = await query(
     `INSERT INTO streaks (user_id, current_streak, longest_streak, last_active_date, updated_at)
      VALUES ($1, $2, $3, $4, NOW())
@@ -257,10 +247,63 @@ export async function saveWeeklySummary(userId, content) {
   const weekStart = new Date();
   weekStart.setDate(weekStart.getDate() - 6);
   const weekEnd = new Date();
-
   await query(
     `INSERT INTO weekly_summaries (user_id, week_start, week_end, content)
      VALUES ($1, $2, $3, $4)`,
     [userId, weekStart.toISOString().split('T')[0], weekEnd.toISOString().split('T')[0], content]
   );
+}
+
+// ── Account Linking ──────────────────────────────────────────
+
+export async function createLinkToken(userId) {
+  const token = Math.random().toString(36).slice(2, 8).toUpperCase();
+  const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+  await query(
+    `INSERT INTO link_tokens (user_id, token, expires_at)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (user_id) DO UPDATE
+       SET token = $2, expires_at = $3, created_at = NOW()`,
+    [userId, token, expiresAt]
+  );
+  return token;
+}
+
+export async function consumeLinkToken(token) {
+  const { rows } = await query(
+    `DELETE FROM link_tokens
+     WHERE token = $1 AND expires_at > NOW()
+     RETURNING user_id`,
+    [token.toUpperCase()]
+  );
+  return rows[0]?.user_id || null;
+}
+
+export async function mergeUsers(primaryUserId, secondUserId) {
+  await query(`UPDATE user_platforms SET user_id = $1 WHERE user_id = $2`, [primaryUserId, secondUserId]);
+  await query(`UPDATE goals SET user_id = $1 WHERE user_id = $2`, [primaryUserId, secondUserId]);
+
+  const primary = await getStreak(primaryUserId);
+  const second  = await getStreak(secondUserId);
+  const bestStreak  = Math.max(primary.current_streak || 0, second.current_streak || 0);
+  const bestLongest = Math.max(primary.longest_streak || 0, second.longest_streak || 0);
+  await query(
+    `UPDATE streaks SET current_streak = $1, longest_streak = $2 WHERE user_id = $3`,
+    [bestStreak, bestLongest, primaryUserId]
+  );
+
+  await query(
+    `UPDATE daily_activities SET user_id = $1
+     WHERE user_id = $2
+       AND activity_date NOT IN (
+         SELECT activity_date FROM daily_activities WHERE user_id = $1
+       )`,
+    [primaryUserId, secondUserId]
+  );
+  await query(`UPDATE checkin_responses SET user_id = $1 WHERE user_id = $2`, [primaryUserId, secondUserId]);
+
+  await query(`DELETE FROM streaks WHERE user_id = $1`, [secondUserId]);
+  await query(`DELETE FROM goals WHERE user_id = $1`, [secondUserId]);
+  await query(`DELETE FROM daily_activities WHERE user_id = $1`, [secondUserId]);
+  await query(`DELETE FROM users WHERE id = $1`, [secondUserId]);
 }
