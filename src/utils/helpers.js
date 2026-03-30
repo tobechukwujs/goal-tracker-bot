@@ -116,3 +116,38 @@ export function weekStart() {
   d.setDate(d.getDate() + diff);
   return d.toISOString().split('T')[0];
 }
+
+/**
+ * Parse numbered tasks from AI-generated plan text.
+ * Extracts lines like "1. Do something" or "1) Do something"
+ * Returns array of { number, text }
+ */
+export function parseTasks(planText) {
+  const lines = planText.split('\n');
+  const tasks = [];
+  const taskRegex = /^[\s*~]*(\d+)[.)]\s+(.+)/;
+
+  for (const line of lines) {
+    const match = line.match(taskRegex);
+    if (match) {
+      tasks.push({
+        number: parseInt(match[1]),
+        text:   match[2].trim().replace(/[*~]/g, ''),
+      });
+    }
+  }
+  return tasks;
+}
+
+/**
+ * Format tasks list as a message with checkboxes.
+ * Shows ✅ for completed, ⬜ for pending, 🔄 for carried over.
+ */
+export function formatTasksMessage(tasks) {
+  if (!tasks || tasks.length === 0) return 'No tasks found.';
+
+  return tasks.map(t => {
+    const icon = t.is_completed ? '✅' : t.carried_over ? '🔄' : '⬜';
+    return `${icon} ${t.task_number}. ${t.task_text}`;
+  }).join('\n');
+}
