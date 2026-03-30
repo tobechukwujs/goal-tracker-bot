@@ -10,6 +10,7 @@ import { sendMessage } from './messenger.js';
 import { validateGoalText, validateGoalId, validateEditArgs } from '../utils/validate.js';
 import { logger } from '../utils/logger.js';
 import * as milestones from './milestones.js';
+import { parseTasks, formatTasksMessage } from '../utils/helpers.js';
 
 const CTX = 'CommandHandler';
 
@@ -134,7 +135,7 @@ export async function handleGenerate({ userId, platform, chatId, firstName }) {
   await db.markGoalsFeatured(rotatedGoals.map(g => g.id));
 
   // Parse and save individual tasks
-  const { parseTasks } = await import('../utils/helpers.js');
+
   const tasks = parseTasks(plan);
   if (tasks.length > 0) {
     const allTasks = [
@@ -295,7 +296,7 @@ export async function handleToday({ userId, platform, chatId }) {
  * Show today's tasks with completion status.
  */
 export async function handleTasks({ userId, platform, chatId }) {
-  const { formatTasksMessage } = await import('../utils/helpers.js');
+
   const tasks = await db.getTodayTasks(userId);
 
   if (tasks.length === 0) {
@@ -314,7 +315,7 @@ export async function handleTasks({ userId, platform, chatId }) {
  * Tick a task as complete when user replies with a number.
  */
 export async function handleTickTask({ userId, platform, chatId, taskNumber }) {
-  const { formatTasksMessage } = await import('../utils/helpers.js');
+
   const task = await db.completeTask(userId, taskNumber);
 
   if (!task) {

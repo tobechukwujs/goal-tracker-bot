@@ -10,7 +10,7 @@ import * as db from '../db/index.js';
 import * as claude from '../services/claude.js';
 import { broadcast } from '../services/messenger.js';
 import { logger } from '../utils/logger.js';
-import { chunk } from '../utils/helpers.js';
+import { chunk, parseTasks } from '../utils/helpers.js';
 import { config } from '../config/index.js';
 import * as milestones from '../services/milestones.js';
 
@@ -64,7 +64,7 @@ async function runMorningPlan() {
         await milestones.checkStreakMilestone(user.id, user.first_name, updatedStreak.current_streak, platforms);
 
         // Parse and save tasks
-        const { parseTasks } = await import('../utils/helpers.js');
+
         const tasks = parseTasks(plan);
         if (tasks.length > 0) {
           await db.saveDailyTasks(user.id, tasks.map(t => ({ ...t, number: t.number, carriedOver: false })));
