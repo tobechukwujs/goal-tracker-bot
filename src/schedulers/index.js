@@ -12,6 +12,7 @@ import { broadcast } from '../services/messenger.js';
 import { logger } from '../utils/logger.js';
 import { chunk } from '../utils/helpers.js';
 import { config } from '../config/index.js';
+import * as milestones from '../services/milestones.js';
 
 const CTX = 'Scheduler';
 const TZ  = config.timezone;
@@ -38,7 +39,7 @@ async function getAllUsersWithPlatforms() {
 async function runMorningPlan() {
   logger.info(CTX, '🌅 Running morning plan job...');
   const users = await getAllUsersWithPlatforms();
-  const batches = chunk(users, 5); // process 5 users at a time to avoid API rate limits
+  const batches = chunk(users, 5);
 
   for (const batch of batches) {
     await Promise.allSettled(batch.map(async ({ user, platforms }) => {
@@ -47,11 +48,34 @@ async function runMorningPlan() {
         const goals = await db.getGoals(user.id);
         if (goals.length === 0) return;
 
-        const streakData = await db.getStreak(user.id);
-        const plan = await claude.generateDailyPlan(user.first_name, goals, streakData.current_streak);
+        const rotatedGoals   = await db.getGoalsForRotation(user.id, 6);
+        const recentProgress = await db.getAllRecentProgress(user.id, 3);
+        const streakData     = await db.getStreak(user.id);
+        const carriedTasks   = await db.getIncompleteTasksFromYesterday(user.id);
+        const plan           = await claude.generateDailyPlan(
+          user.first_name, rotatedGoals, streakData.current_streak, carriedTasks, recentProgress
+        );
+
         await db.saveDailyPlan(user.id, plan);
-        await broadcast(platforms, plan);
-        logger.info(CTX, `Morning plan sent`, { userId: user.id });
+
+        // Mark goals as featured and check streak milestones
+        await db.markGoalsFeatured(rotatedGoals.map(g => g.id));
+        const updatedStreak = await db.updateStreak(user.id);
+        await milestones.checkStreakMilestone(user.id, user.first_name, updatedStreak.current_streak, platforms);
+
+        // Parse and save tasks
+        const { parseTasks } = await import('../utils/helpers.js');
+        const tasks = parseTasks(plan);
+        if (tasks.length > 0) {
+          await db.saveDailyTasks(user.id, tasks.map(t => ({ ...t, number: t.number, carriedOver: false })));
+        }
+
+        const tickMsg = tasks.length > 0
+          ? `\n\n✅ *Tick tasks by replying with the number* (e.g. \`1\`, \`2\`)`
+          : '';
+
+        await broadcast(platforms, plan + tickMsg);
+        logger.info(CTX, `Morning plan sent`, { userId: user.id, tasks: tasks.length, carried: carriedTasks.length });
       } catch (err) {
         logger.error(CTX, `Morning plan failed`, { userId: user.id, err: err.message });
       }

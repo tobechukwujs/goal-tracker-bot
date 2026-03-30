@@ -9,6 +9,7 @@ import * as claude from './claude.js';
 import { sendMessage } from './messenger.js';
 import { validateGoalText, validateGoalId, validateEditArgs } from '../utils/validate.js';
 import { logger } from '../utils/logger.js';
+import * as milestones from './milestones.js';
 
 const CTX = 'CommandHandler';
 
@@ -106,22 +107,122 @@ export async function handleDeleteGoal({ userId, platform, chatId, args }) {
 // ── Manual Plan Generation ───────────────────────────────────
 
 export async function handleGenerate({ userId, platform, chatId, firstName }) {
-  const goals = await db.getGoals(userId);
-  if (goals.length === 0) {
+  const allGoals = await db.getGoals(userId);
+  if (allGoals.length === 0) {
     return sendMessage({
       platform, chatId,
       text: "You have no goals set yet! Add some with `/addgoal` first.",
     });
   }
 
-  await sendMessage({ platform, chatId, text: '⏳ Generating your plan with Claude AI...' });
+  await sendMessage({ platform, chatId, text: '⏳ Generating your plan...' });
 
-  const streakData = await db.getStreak(userId);
-  const plan = await claude.generateDailyPlan(firstName, goals, streakData.current_streak);
+  // Priority rotation — pick least-recently-featured goals
+  const rotatedGoals   = await db.getGoalsForRotation(userId, 6);
+  const recentProgress = await db.getAllRecentProgress(userId, 3);
+  const streakData     = await db.getStreak(userId);
+  const carriedTasks   = await db.getIncompleteTasksFromYesterday(userId);
+
+  const plan = await claude.generateDailyPlan(
+    firstName, rotatedGoals, streakData.current_streak, carriedTasks, recentProgress
+  );
+
   await db.saveDailyPlan(userId, plan);
   await db.updateStreak(userId);
 
-  await sendMessage({ platform, chatId, text: plan });
+  // Mark these goals as featured today
+  await db.markGoalsFeatured(rotatedGoals.map(g => g.id));
+
+  // Parse and save individual tasks
+  const { parseTasks } = await import('../utils/helpers.js');
+  const tasks = parseTasks(plan);
+  if (tasks.length > 0) {
+    const allTasks = [
+      ...carriedTasks.map((t, i) => ({ number: i + 1, text: t.task_text, carriedOver: true })),
+      ...tasks.filter(t => !carriedTasks.some(c => c.task_text === t.text))
+              .map((t, i) => ({ number: carriedTasks.length + i + 1, text: t.text, carriedOver: false })),
+    ];
+    await db.saveDailyTasks(userId, allTasks.length > 0 ? allTasks : tasks.map(t => ({ ...t, carriedOver: false })));
+  }
+
+  const tickMsg = tasks.length > 0
+    ? `\n\n✅ *Tick tasks by replying with a number* (e.g. \`1\`, \`2\`, \`3\`)\n📋 Use \`/tasks\` to see your task list`
+    : '';
+
+  await sendMessage({ platform, chatId, text: plan + tickMsg });
+  logger.info(CTX, 'Plan generated', { userId, tasks: tasks.length, carried: carriedTasks.length, goals: rotatedGoals.length });
+}
+
+// ── Goal Progress Logging ─────────────────────────────────────
+
+export async function handleProgress({ userId, platform, chatId, firstName, args }) {
+  const parts  = args?.trim().split(/\s+/);
+  const goalId = parseInt(parts?.[0]);
+  const update = parts?.slice(1).join(' ');
+
+  if (!goalId || !update || update.length < 3) {
+    return sendMessage({
+      platform, chatId,
+      text: `📝 *Log progress on a goal*\n\nUsage: \`/progress <goalId> <your update>\`\n\nExamples:\n\`/progress 5 Solved 3 LeetCode problems, total now 48\`\n\`/progress 8 Weight now 69.5kg, up from 68kg\`\n\`/progress 10 SpaceShare has 12 users signed up\`\n\nUse \`/goals\` to see your goal IDs.`,
+    });
+  }
+
+  const goals = await db.getGoals(userId);
+  const goal  = goals.find(g => g.id === goalId);
+  if (!goal) {
+    return sendMessage({ platform, chatId, text: `❌ Goal not found. Use \`/goals\` to see your goal IDs.` });
+  }
+
+  const numMatch     = update.match(/\b(\d+\.?\d*)\b/);
+  const numericValue = numMatch ? parseFloat(numMatch[1]) : null;
+
+  await db.logGoalProgress({ userId, goalId, updateText: update, numericValue });
+
+  const logs = await db.getGoalProgressLogs(goalId, 3);
+  const history = logs.length > 1
+    ? `\n\n📜 *Recent updates:*\n${logs.slice(1).map(l => `• ${new Date(l.logged_at).toLocaleDateString('en-GB')} — ${l.update_text}`).join('\n')}`
+    : '';
+
+  await sendMessage({
+    platform, chatId,
+    text: `✅ *Progress logged!*\n\n🎯 *${goal.goal_text}*\n📝 ${update}${history}`,
+  });
+
+  // Check for milestone celebration
+  const platforms = await db.getUserPlatforms(userId);
+  await milestones.checkProgressMilestone(userId, firstName, goalId, update, platforms);
+  logger.info(CTX, 'Progress logged', { userId, goalId, numericValue });
+}
+
+export async function handleGoalStats({ userId, platform, chatId, args }) {
+  const goalId = parseInt(args?.trim());
+  if (!goalId) {
+    return sendMessage({
+      platform, chatId,
+      text: `Usage: \`/goalstats <goalId>\`\n\nGet goal IDs with \`/goals\``,
+    });
+  }
+
+  const goals = await db.getGoals(userId);
+  const goal  = goals.find(g => g.id === goalId);
+  if (!goal) return sendMessage({ platform, chatId, text: `❌ Goal not found.` });
+
+  const logs = await db.getGoalProgressLogs(goalId, 10);
+  if (logs.length === 0) {
+    return sendMessage({
+      platform, chatId,
+      text: `No progress logged yet for:\n*${goal.goal_text}*\n\nStart with:\n\`/progress ${goalId} your update here\``,
+    });
+  }
+
+  const history = logs.map((l, i) =>
+    `${i + 1}. ${new Date(l.logged_at).toLocaleDateString('en-GB')} — ${l.update_text}${l.numeric_value ? ` *(${l.numeric_value})*` : ''}`
+  ).join('\n');
+
+  await sendMessage({
+    platform, chatId,
+    text: `📊 *Progress History*\n🎯 ${goal.goal_text}\n\n${history}`,
+  });
 }
 
 // ── Streak ───────────────────────────────────────────────────
@@ -147,10 +248,15 @@ export async function handleHelp({ platform, chatId }) {
 \`/editgoal <id> <text>\` — Edit a goal
 \`/deletegoal <id>\` — Remove a goal
 
-*Plans & Progress*
-\`/generate\` — Generate today's plan now
-\`/streak\` — See your current streak
+*Progress Tracking*
+\`/progress <id> <update>\` — Log progress on a goal
+\`/goalstats <id>\` — View progress history for a goal
+
+*Plans & Tasks*
+\`/generate\` — Generate today's plan
 \`/today\` — See today's plan
+\`/tasks\` — See today's tasks with status
+\`/streak\` — See your current streak
 
 *Account*
 \`/link\` — Get a code to link Telegram ↔ WhatsApp
@@ -160,10 +266,14 @@ export async function handleHelp({ platform, chatId }) {
 \`/help\` — Show this message
 
 📅 *Automatic Schedule (WAT)*
-• 6:00 AM — Daily plan
+• 6:00 AM — Daily plan (rotates goals)
 • 9 AM, 12 PM, 3 PM, 6 PM — Check-ins
 • 9:00 PM — Evening wrap-up
-• Sunday 8 PM — Weekly summary`;
+• Sunday 8 PM — Weekly summary
+
+💡 *Tips*
+• Reply \`1\` \`2\` \`3\` to tick off tasks
+• Use \`/progress\` to log real numbers (weight, users, problems)`;
 
   await sendMessage({ platform, chatId, text: help });
 }
@@ -177,6 +287,66 @@ export async function handleToday({ userId, platform, chatId }) {
     });
   }
   await sendMessage({ platform, chatId, text: plan.content });
+}
+
+// ── Task Ticking ─────────────────────────────────────────────
+
+/**
+ * Show today's tasks with completion status.
+ */
+export async function handleTasks({ userId, platform, chatId }) {
+  const { formatTasksMessage } = await import('../utils/helpers.js');
+  const tasks = await db.getTodayTasks(userId);
+
+  if (tasks.length === 0) {
+    return sendMessage({
+      platform, chatId,
+      text: "No tasks for today yet. Use `/generate` to create your daily plan!",
+    });
+  }
+
+  const completed = tasks.filter(t => t.is_completed).length;
+  const msg = `📋 *Today's Tasks (${completed}/${tasks.length} done)*\n\n${formatTasksMessage(tasks)}\n\nReply with a number to tick it off (e.g. \`1\`, \`2\`)`;
+  await sendMessage({ platform, chatId, text: msg });
+}
+
+/**
+ * Tick a task as complete when user replies with a number.
+ */
+export async function handleTickTask({ userId, platform, chatId, taskNumber }) {
+  const { formatTasksMessage } = await import('../utils/helpers.js');
+  const task = await db.completeTask(userId, taskNumber);
+
+  if (!task) {
+    return sendMessage({
+      platform, chatId,
+      text: `❌ Task ${taskNumber} not found. Use \`/tasks\` to see your task list.`,
+    });
+  }
+
+  const allTasks = await db.getTodayTasks(userId);
+  const completed = allTasks.filter(t => t.is_completed).length;
+  const total     = allTasks.length;
+
+  let msg = `✅ *Task ${taskNumber} completed!*\n\n${formatTasksMessage(allTasks)}`;
+
+  if (completed === total) {
+    msg += `\n\n🎉 *All tasks done for today! Amazing work!* 🔥`;
+    await db.updateStreak(userId);
+  } else {
+    msg += `\n\n${completed}/${total} tasks done. Keep going!`;
+  }
+
+  await sendMessage({ platform, chatId, text: msg });
+
+  // Check for task milestone celebration
+  const platforms = await db.getUserPlatforms(userId);
+  const user      = await db.getUserById(userId);
+  if (user) {
+    await milestones.checkTaskMilestone(userId, user.first_name, platforms);
+  }
+
+  logger.info(CTX, 'Task ticked', { userId, taskNumber, completed, total });
 }
 
 // ── Account Linking ──────────────────────────────────────────

@@ -235,7 +235,7 @@ export async function resetStreakIfMissed(userId) {
 
   if (lastActive < yesterdayStr) {
     await query(
-      `UPDATE streaks SET current_streak = 0, updated_at = NOW() WHERE user_id = $1`,
+      'UPDATE streaks SET current_streak = 0, updated_at = NOW() WHERE user_id = $1',
       [userId]
     );
   }
@@ -280,15 +280,15 @@ export async function consumeLinkToken(token) {
 }
 
 export async function mergeUsers(primaryUserId, secondUserId) {
-  await query(`UPDATE user_platforms SET user_id = $1 WHERE user_id = $2`, [primaryUserId, secondUserId]);
-  await query(`UPDATE goals SET user_id = $1 WHERE user_id = $2`, [primaryUserId, secondUserId]);
+  await query('UPDATE user_platforms SET user_id = $1 WHERE user_id = $2', [primaryUserId, secondUserId]);
+  await query('UPDATE goals SET user_id = $1 WHERE user_id = $2', [primaryUserId, secondUserId]);
 
   const primary = await getStreak(primaryUserId);
   const second  = await getStreak(secondUserId);
   const bestStreak  = Math.max(primary.current_streak || 0, second.current_streak || 0);
   const bestLongest = Math.max(primary.longest_streak || 0, second.longest_streak || 0);
   await query(
-    `UPDATE streaks SET current_streak = $1, longest_streak = $2 WHERE user_id = $3`,
+    'UPDATE streaks SET current_streak = $1, longest_streak = $2 WHERE user_id = $3',
     [bestStreak, bestLongest, primaryUserId]
   );
 
@@ -300,10 +300,159 @@ export async function mergeUsers(primaryUserId, secondUserId) {
        )`,
     [primaryUserId, secondUserId]
   );
-  await query(`UPDATE checkin_responses SET user_id = $1 WHERE user_id = $2`, [primaryUserId, secondUserId]);
+  await query('UPDATE checkin_responses SET user_id = $1 WHERE user_id = $2', [primaryUserId, secondUserId]);
 
-  await query(`DELETE FROM streaks WHERE user_id = $1`, [secondUserId]);
-  await query(`DELETE FROM goals WHERE user_id = $1`, [secondUserId]);
-  await query(`DELETE FROM daily_activities WHERE user_id = $1`, [secondUserId]);
-  await query(`DELETE FROM users WHERE id = $1`, [secondUserId]);
+  await query('DELETE FROM streaks WHERE user_id = $1', [secondUserId]);
+  await query('DELETE FROM goals WHERE user_id = $1', [secondUserId]);
+  await query('DELETE FROM daily_activities WHERE user_id = $1', [secondUserId]);
+  await query('DELETE FROM users WHERE id = $1', [secondUserId]);
+}
+
+// ── Daily Tasks ──────────────────────────────────────────────
+
+/**
+ * Save parsed tasks from the AI plan for a given day.
+ */
+export async function saveDailyTasks(userId, tasks) {
+  for (const task of tasks) {
+    await query(
+      `INSERT INTO daily_tasks (user_id, task_number, task_text, carried_over, task_date)
+       VALUES ($1, $2, $3, $4, CURRENT_DATE)
+       ON CONFLICT (user_id, task_number, task_date) DO UPDATE
+         SET task_text = EXCLUDED.task_text`,
+      [userId, task.number, task.text, task.carriedOver || false]
+    );
+  }
+}
+
+/**
+ * Get today's tasks for a user.
+ */
+export async function getTodayTasks(userId) {
+  const { rows } = await query(
+    `SELECT * FROM daily_tasks
+     WHERE user_id = $1 AND task_date = CURRENT_DATE
+     ORDER BY task_number ASC`,
+    [userId]
+  );
+  return rows;
+}
+
+/**
+ * Mark a task as completed.
+ */
+export async function completeTask(userId, taskNumber) {
+  const { rows } = await query(
+    `UPDATE daily_tasks
+     SET is_completed = TRUE, completed_at = NOW()
+     WHERE user_id = $1 AND task_number = $2 AND task_date = CURRENT_DATE
+     RETURNING *`,
+    [userId, taskNumber]
+  );
+  return rows[0] || null;
+}
+
+/**
+ * Get incomplete tasks from yesterday to carry forward.
+ */
+export async function getIncompleteTasksFromYesterday(userId) {
+  const { rows } = await query(
+    `SELECT * FROM daily_tasks
+     WHERE user_id = $1
+       AND task_date = CURRENT_DATE - INTERVAL '1 day'
+       AND is_completed = FALSE
+     ORDER BY task_number ASC`,
+    [userId]
+  );
+  return rows;
+}
+
+// ── Goal Progress Logs ────────────────────────────────────────
+
+export async function logGoalProgress({ userId, goalId, updateText, numericValue }) {
+  const { rows } = await query(
+    `INSERT INTO goal_progress_logs (user_id, goal_id, update_text, numeric_value)
+     VALUES ($1, $2, $3, $4) RETURNING *`,
+    [userId, goalId, updateText, numericValue || null]
+  );
+  return rows[0];
+}
+
+export async function getGoalProgressLogs(goalId, limit = 5) {
+  const { rows } = await query(
+    `SELECT * FROM goal_progress_logs
+     WHERE goal_id = $1
+     ORDER BY logged_at DESC LIMIT $2`,
+    [goalId, limit]
+  );
+  return rows;
+}
+
+export async function getAllRecentProgress(userId, days = 7) {
+  const { rows } = await query(
+    `SELECT gpl.*, g.goal_text, g.category
+     FROM goal_progress_logs gpl
+     JOIN goals g ON g.id = gpl.goal_id
+     WHERE gpl.user_id = $1
+       AND gpl.logged_at >= NOW() - INTERVAL '${days} days'
+     ORDER BY gpl.logged_at DESC`,
+    [userId]
+  );
+  return rows;
+}
+
+// ── Milestones ────────────────────────────────────────────────
+
+export async function checkAndSaveMilestone(userId, milestoneKey) {
+  try {
+    await query(
+      `INSERT INTO milestones_achieved (user_id, milestone_key)
+       VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+      [userId, milestoneKey]
+    );
+    // If insert succeeded (not duplicate), return true
+    const { rows } = await query(
+      `SELECT id FROM milestones_achieved
+       WHERE user_id = $1 AND milestone_key = $2
+         AND achieved_at >= NOW() - INTERVAL '10 seconds'`,
+      [userId, milestoneKey]
+    );
+    return rows.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+export async function getTotalTasksCompleted(userId) {
+  const { rows } = await query(
+    `SELECT COUNT(*) as total FROM daily_tasks
+     WHERE user_id = $1 AND is_completed = TRUE`,
+    [userId]
+  );
+  return parseInt(rows[0].total);
+}
+
+// ── Priority Rotation ─────────────────────────────────────────
+
+export async function getGoalsForRotation(userId, dailyLimit = 6) {
+  // Returns goals sorted by: never featured first, then least recently featured
+  const { rows } = await query(
+    `SELECT * FROM goals
+     WHERE user_id = $1 AND is_active = TRUE
+     ORDER BY
+       last_featured_date ASC NULLS FIRST,
+       priority ASC
+     LIMIT $2`,
+    [userId, dailyLimit]
+  );
+  return rows;
+}
+
+export async function markGoalsFeatured(goalIds) {
+  if (!goalIds.length) return;
+  await query(
+    `UPDATE goals SET last_featured_date = CURRENT_DATE
+     WHERE id = ANY($1)`,
+    [goalIds]
+  );
 }

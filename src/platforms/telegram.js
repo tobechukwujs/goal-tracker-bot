@@ -101,6 +101,31 @@ export function initTelegram() {
     await handler.handleToday({ userId: user.id, platform: 'telegram', chatId: String(msg.chat.id) });
   });
 
+  // ── /progress ─────────────────────────────────────────────
+  bot.onText(/\/progress (.+)/, async (msg, match) => {
+    const user = await db.getUserByPlatformId('telegram', String(msg.chat.id));
+    if (!user) return;
+    await handler.handleProgress({
+      userId:    user.id,
+      platform:  'telegram',
+      chatId:    String(msg.chat.id),
+      firstName: msg.from.first_name || 'Friend',
+      args:      match[1],
+    });
+  });
+
+  // ── /goalstats ────────────────────────────────────────────
+  bot.onText(/\/goalstats (.+)/, async (msg, match) => {
+    const user = await db.getUserByPlatformId('telegram', String(msg.chat.id));
+    if (!user) return;
+    await handler.handleGoalStats({
+      userId:   user.id,
+      platform: 'telegram',
+      chatId:   String(msg.chat.id),
+      args:     match[1],
+    });
+  });
+
   // ── /link ─────────────────────────────────────────────────
   bot.onText(/\/link/, async (msg) => {
     const user = await db.getUserByPlatformId('telegram', String(msg.chat.id));
@@ -120,13 +145,33 @@ export function initTelegram() {
     });
   });
 
-  // ── Free-text (check-in responses) ───────────────────────
+  // ── /tasks ────────────────────────────────────────────────
+  bot.onText(/\/tasks/, async (msg) => {
+    const user = await db.getUserByPlatformId('telegram', String(msg.chat.id));
+    if (!user) return;
+    await handler.handleTasks({ userId: user.id, platform: 'telegram', chatId: String(msg.chat.id) });
+  });
+
+  // ── Free-text (task ticking + check-in responses) ────────
   bot.on('message', async (msg) => {
     if (msg.text && msg.text.startsWith('/')) return;
 
     const user = await db.getUserByPlatformId('telegram', String(msg.chat.id));
     if (!user) return;
 
+    const text = msg.text?.trim();
+
+    // Check if it's a task number (1-9)
+    if (/^\d+$/.test(text) && parseInt(text) >= 1 && parseInt(text) <= 9) {
+      return handler.handleTickTask({
+        userId:     user.id,
+        platform:   'telegram',
+        chatId:     String(msg.chat.id),
+        taskNumber: parseInt(text),
+      });
+    }
+
+    // Otherwise treat as check-in response
     const hour = new Date().getHours();
     let slot = null;
     if (hour >= 9  && hour < 12) slot = '9am';
@@ -138,7 +183,7 @@ export function initTelegram() {
       await db.saveCheckinResponse({
         userId:       user.id,
         checkinTime:  slot,
-        responseText: msg.text,
+        responseText: text,
         platform:     'telegram',
       });
       await db.updateStreak(user.id);

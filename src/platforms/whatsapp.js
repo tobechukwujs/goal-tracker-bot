@@ -64,6 +64,15 @@ export function initWhatsApp(app) {
       } else if (cmd === 'today') {
         const user = await db.getUserByPlatformId('whatsapp', from);
         if (user) await handler.handleToday({ userId: user.id, platform: 'whatsapp', chatId: from });
+      } else if (cmd.startsWith('progress ')) {
+        const user = await db.getUserByPlatformId('whatsapp', from);
+        if (user) await handler.handleProgress({ userId: user.id, platform: 'whatsapp', chatId: from, firstName: profile, args: body.slice(9) });
+      } else if (cmd.startsWith('goalstats ')) {
+        const user = await db.getUserByPlatformId('whatsapp', from);
+        if (user) await handler.handleGoalStats({ userId: user.id, platform: 'whatsapp', chatId: from, args: body.slice(10) });
+      } else if (cmd === 'tasks') {
+        const user = await db.getUserByPlatformId('whatsapp', from);
+        if (user) await handler.handleTasks({ userId: user.id, platform: 'whatsapp', chatId: from });
       } else if (cmd === 'link') {
         const user = await db.getUserByPlatformId('whatsapp', from);
         if (user) await handler.handleLink({ userId: user.id, platform: 'whatsapp', chatId: from });
@@ -71,22 +80,32 @@ export function initWhatsApp(app) {
         const user = await db.getUserByPlatformId('whatsapp', from);
         if (user) await handler.handleConfirmLink({ userId: user.id, platform: 'whatsapp', chatId: from, token: body.slice(8) });
       } else {
-        // Free-text — treat as check-in response
+        // Free-text — check if it's a task number first
         const user = await db.getUserByPlatformId('whatsapp', from);
         if (user) {
-          const hour = new Date().getHours();
-          let slot = null;
-          if (hour >= 9  && hour < 12) slot = '9am';
-          if (hour >= 12 && hour < 15) slot = '12pm';
-          if (hour >= 15 && hour < 18) slot = '3pm';
-          if (hour >= 18 && hour < 21) slot = '6pm';
-
-          if (slot) {
-            await db.saveCheckinResponse({ userId: user.id, checkinTime: slot, responseText: body, platform: 'whatsapp' });
-            await db.updateStreak(user.id);
-            await sendMessage({ platform: 'whatsapp', chatId: from, text: '✅ Response recorded! Keep going 💪' });
+          if (/^\d+$/.test(body.trim()) && parseInt(body.trim()) >= 1 && parseInt(body.trim()) <= 9) {
+            await handler.handleTickTask({
+              userId:     user.id,
+              platform:   'whatsapp',
+              chatId:     from,
+              taskNumber: parseInt(body.trim()),
+            });
           } else {
-            await sendMessage({ platform: 'whatsapp', chatId: from, text: 'Type *help* to see available commands.' });
+            // Treat as check-in response
+            const hour = new Date().getHours();
+            let slot = null;
+            if (hour >= 9  && hour < 12) slot = '9am';
+            if (hour >= 12 && hour < 15) slot = '12pm';
+            if (hour >= 15 && hour < 18) slot = '3pm';
+            if (hour >= 18 && hour < 21) slot = '6pm';
+
+            if (slot) {
+              await db.saveCheckinResponse({ userId: user.id, checkinTime: slot, responseText: body, platform: 'whatsapp' });
+              await db.updateStreak(user.id);
+              await sendMessage({ platform: 'whatsapp', chatId: from, text: '✅ Response recorded! Keep going 💪' });
+            } else {
+              await sendMessage({ platform: 'whatsapp', chatId: from, text: 'Type *help* to see available commands.' });
+            }
           }
         } else {
           await sendMessage({ platform: 'whatsapp', chatId: from, text: 'Type *start* to register and begin tracking your goals! 🎯' });

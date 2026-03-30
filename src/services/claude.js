@@ -37,26 +37,38 @@ async function ask(systemPrompt, userMessage) {
 
 // ── Public Functions ─────────────────────────────────────────
 
-export async function generateDailyPlan(firstName, goals, streak) {
-  const goalList  = goals
+export async function generateDailyPlan(firstName, goals, streak, carriedTasks = [], recentProgress = []) {
+  const goalList = goals
     .map((g, i) => `${i + 1}. [${g.category}] ${g.goal_text}${g.target_date ? ` (target: ${g.target_date})` : ''}`)
     .join('\n');
   const streakMsg = streak > 0 ? `They are currently on a 🔥 ${streak}-day streak.` : '';
 
+  const carriedSection = carriedTasks.length > 0
+    ? `\n⚠️ These tasks were NOT completed yesterday — include them in today's plan:\n${carriedTasks.map((t, i) => `${i + 1}. ${t.task_text}`).join('\n')}\n`
+    : '';
+
+  const progressSection = recentProgress.length > 0
+    ? `\nRecent progress updates from the user:\n${recentProgress.map(p => `- [${p.category}] ${p.goal_text}: "${p.update_text}"`).join('\n')}\n`
+    : '';
+
   const system = `You are an encouraging, no-nonsense personal accountability coach.
 You generate concise, actionable daily plans. Use emojis sparingly but effectively.
-Keep the total response under 300 words. Format with clear sections.`;
+Keep the total response under 350 words. Format with clear sections.
+IMPORTANT: Number every task clearly as 1. 2. 3. etc on its own line.`;
 
   const user = `Generate a daily action plan for ${firstName}.
 ${streakMsg}
-
-Their long-term goals are:
+${carriedSection}
+${progressSection}
+Their goals for today (already rotated for variety):
 ${goalList}
 
-Create a realistic daily to-do list for TODAY that makes meaningful progress on these goals.
+Create a realistic daily to-do list for TODAY (5-7 tasks).
+${carriedTasks.length > 0 ? 'List carried-over tasks first, then add new ones.' : ''}
+${recentProgress.length > 0 ? 'Reference their recent progress where relevant to keep tasks specific.' : ''}
 Structure the response as:
 1. A short motivational opener (1 sentence)
-2. Today's Action Plan (5-7 specific tasks, grouped by goal)
+2. Today's Action Plan — number each task: 1. task, 2. task etc.
 3. One focus tip for the day`;
 
   return ask(system, user);
